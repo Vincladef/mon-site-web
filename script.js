@@ -35,18 +35,17 @@ fetch(`${CONFIG_URL}?user=${user}`)
     console.error("Erreur attrapée :", err);
   });
 
-
 // 📦 Le cœur de l’application, lancé une fois l’apiUrl récupérée
 function initApp(apiUrl) {
   document.getElementById("user-title").textContent =
     `📝 Formulaire du jour – ${user.charAt(0).toUpperCase() + user.slice(1)}`;
 
-  const today = new Date();
-  const options = { weekday: "long", day: "numeric", month: "long", year: "numeric" };
-  document.getElementById("date-display").textContent =
-    `📅 ${today.toLocaleDateString("fr-FR", options)}`;
+  const dateDisplay = document.getElementById("date-display");
+  if (dateDisplay) dateDisplay.remove();
 
   const dateSelect = document.getElementById("date-select");
+  dateSelect.classList.add("mb-4");
+
   const pastDates = [...Array(7)].map((_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -79,12 +78,11 @@ function initApp(apiUrl) {
 
     entries.apiUrl = apiUrl;
 
-fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
-  method: "POST",
-  body: JSON.stringify(entries),
-  headers: { "Content-Type": "application/json" }
-})
-
+    fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
+      method: "POST",
+      body: JSON.stringify(entries),
+      headers: { "Content-Type": "application/json" }
+    })
       .then(res => res.text())
       .then(txt => alert("✅ Réponses envoyées !"))
       .catch(err => {
@@ -105,19 +103,19 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
         const normalize = str =>
           (str || "")
             .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[̀-ͯ]/g, "")
             .replace(/[\u00A0\u202F\u200B]/g, " ")
             .replace(/\s+/g, " ")
             .toLowerCase()
             .trim();
 
-        const valenceColors = {
-          "oui": "text-green-700 font-semibold",
-          "plutot oui": "text-green-600",
-          "moyen": "text-yellow-600",
-          "plutot non": "text-red-400",
-          "non": "text-red-600 font-semibold",
-          "pas de reponse": "text-gray-500 italic"
+        const colorMap = {
+          "oui": "bg-green-100 text-green-800",
+          "plutot oui": "bg-green-50 text-green-700",
+          "moyen": "bg-yellow-100 text-yellow-800",
+          "plutot non": "bg-red-100 text-red-700",
+          "non": "bg-red-200 text-red-900",
+          "pas de reponse": "bg-gray-200 text-gray-700 italic"
         };
 
         questions.forEach(q => {
@@ -129,8 +127,16 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
           label.textContent = q.skipped ? `🎉 ${q.label}` : q.label;
           wrapper.appendChild(label);
 
+          const referenceAnswerEntry = q.history?.find(entry => {
+            const [dd, mm, yyyy] = entry.date.split("/");
+            const entryDateISO = `${yyyy.padStart(4, "0")}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+            return entryDateISO === dateISO;
+          });
+          const referenceAnswer = referenceAnswerEntry?.value || "";
+
           if (q.skipped) {
-            wrapper.classList.add("bg-green-50", "border", "border-green-200", "opacity-70", "pointer-events-none");
+            wrapper.classList.add("bg-green-50", "border", "border-green-200", "opacity-70");
+            wrapper.style.pointerEvents = "none";
 
             const reason = document.createElement("p");
             reason.className = "text-sm italic text-green-700 mb-2";
@@ -150,8 +156,8 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
               input = document.createElement("div");
               input.className = "space-x-6 text-gray-700";
               input.innerHTML = `
-                <label><input type="radio" name="${q.id}" value="Oui" class="mr-1">Oui</label>
-                <label><input type="radio" name="${q.id}" value="Non" class="mr-1">Non</label>
+                <label><input type="radio" name="${q.id}" value="Oui" class="mr-1" ${referenceAnswer === "Oui" ? "checked" : ""}>Oui</label>
+                <label><input type="radio" name="${q.id}" value="Non" class="mr-1" ${referenceAnswer === "Non" ? "checked" : ""}>Non</label>
               `;
             } else if (type.includes("menu") || type.includes("likert")) {
               input = document.createElement("select");
@@ -161,6 +167,7 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
                 const option = document.createElement("option");
                 option.value = opt;
                 option.textContent = opt;
+                if (opt === referenceAnswer) option.selected = true;
                 input.appendChild(option);
               });
             } else if (type.includes("plus long")) {
@@ -168,11 +175,13 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
               input.name = q.id;
               input.rows = 4;
               input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
+              input.value = referenceAnswer;
             } else {
               input = document.createElement("input");
               input.name = q.id;
               input.type = "text";
               input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
+              input.value = referenceAnswer;
             }
 
             wrapper.appendChild(input);
@@ -180,28 +189,36 @@ fetch("https://tight-snowflake-cdad.como-denizot.workers.dev/", {
 
           if (q.history && q.history.length > 0) {
             const historyBlock = document.createElement("div");
-            historyBlock.className = "text-sm mt-3";
-            const historyList = document.createElement("ul");
-            historyList.className = "space-y-1";
+            historyBlock.className = "mt-6 px-4 py-5 rounded-xl bg-gray-50";
+            historyBlock.style.pointerEvents = "auto";
 
-            q.history.forEach(entry => {
-              const li = document.createElement("li");
-              const color = valenceColors[normalize(entry.value)] || "text-gray-700";
+            const title = document.createElement("div");
+            title.className = "text-gray-500 mb-3 font-medium";
+            title.textContent = "📓 Historique";
+            historyBlock.appendChild(title);
 
-              const dateSpan = document.createElement("span");
-              dateSpan.className = "text-gray-400 mr-2";
-              dateSpan.textContent = `📅 ${entry.date}`;
+            const timelineWrapper = document.createElement("div");
+            timelineWrapper.className = "overflow-x-auto pb-4";
 
-              const valueSpan = document.createElement("span");
-              valueSpan.className = color;
-              valueSpan.textContent = entry.value;
+            const timeline = document.createElement("div");
+            timeline.className = "flex gap-2 w-max";
 
-              li.appendChild(dateSpan);
-              li.appendChild(valueSpan);
-              historyList.appendChild(li);
+            q.history.slice().reverse().forEach(entry => {
+              const normalized = normalize(entry.value);
+              const colorClass = colorMap[normalized] || "bg-gray-100 text-gray-700";
+
+              const parts = entry.date.split("/");
+              const shortDate = `${parts[0]}/${parts[1]}/${parts[2].slice(-2)}`;
+
+              const block = document.createElement("div");
+              block.className = `px-3 py-1 rounded-xl text-sm font-medium whitespace-nowrap ${colorClass}`;
+              block.textContent = `${shortDate} – ${entry.value}`;
+
+              timeline.appendChild(block);
             });
 
-            historyBlock.appendChild(historyList);
+            timelineWrapper.appendChild(timeline);
+            historyBlock.appendChild(timelineWrapper);
             wrapper.appendChild(historyBlock);
           }
 
