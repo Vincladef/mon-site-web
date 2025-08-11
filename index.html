@@ -10,31 +10,24 @@
 <body class="bg-gray-100">
 
   <div class="max-w-3xl mx-auto p-6 mt-8 bg-white rounded-xl shadow">
-    <!-- ✅ Titre dynamique -->
     <h1 id="user-title" class="text-2xl font-bold mb-2">📝 Formulaire du jour</h1>
     <p id="date-display" class="text-gray-600 mb-4"></p>
 
-    <!-- 📅 Sélecteur de date -->
-    <div class="mb-6">
+    <div class="mb-4">
       <label for="date-select" class="block text-sm font-medium text-gray-700 mb-1">
-        Pour quelle date remplis-tu ce formulaire ?
+        Choisis une date ou un mode pratique
       </label>
       <select id="date-select" class="block w-full border border-gray-300 rounded px-3 py-2 bg-white text-gray-800">
-        <!-- Options insérées dynamiquement via script.js -->
-      </select>
+        </select>
     </div>
 
-    <!-- ⏳ Chargement -->
     <div id="loader" class="text-center py-8 text-gray-500 italic">
       Chargement des questions en cours...
     </div>
 
-    <!-- 📝 Formulaire principal -->
     <form id="daily-form" class="space-y-6 hidden">
-      <!-- Les questions seront injectées ici -->
-    </form>
+      </form>
 
-    <!-- ✅ Bouton de soumission -->
     <div id="submit-section" class="mt-8 text-center hidden">
       <button id="submitBtn" class="px-6 py-3 bg-green-600 text-white rounded hover:bg-green-700 transition">
         ✅ Envoyer mes réponses
@@ -42,7 +35,6 @@
     </div>
   </div>
 
-  <!-- ✅ Tailwind Safelist pour éviter la purge des classes dynamiques -->
   <div class="hidden text-orange-600 text-green-600 text-yellow-600 text-red-600 text-gray-500 text-gray-700"></div>
 
 </body>
