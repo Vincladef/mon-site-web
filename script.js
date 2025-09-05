@@ -67,6 +67,10 @@ async function initApp() {
   // ✅ Mémoire des délais sélectionnés (clé -> valeur)
   window.__delayValues = window.__delayValues || {};
 
+  // états SR en mémoire
+  window.__srToggles  = window.__srToggles || {}; // état courant (on/off) tel que l’UI l’affiche
+  window.__srBaseline = window.__srBaseline || {}; // état de référence venu du backend (pour ne POSTer que les différences)
+
   // Titre dynamique
   document.getElementById("user-title").textContent =
     `📝 Formulaire du jour – ${user.charAt(0).toUpperCase() + user.slice(1)}`;
@@ -144,6 +148,44 @@ async function initApp() {
     console.log("✅ Sélecteur de mode et de date prêt.");
   }
 
+  // Ordonne l'historique pour l'affichage en liste: RÉCENT -> ANCIEN
+  function orderForHistory(hist) {
+    const dateRe = /(\d{2})\/(\d{2})\/(\d{4})/;
+    const iterRe = /\b(\d+)\s*\(/;
+    const toKey = (e, idx) => {
+      if (Number.isFinite(e.colIndex)) return { k:e.colIndex, kind:"col" };
+      if (e.date && dateRe.test(e.date)) {
+        const [,d,m,y] = e.date.match(dateRe); return { k:new Date(`${y}-${m}-${d}`).getTime(), kind:"time" };
+      }
+      if (e.key && dateRe.test(e.key)) {
+        const [,d,m,y] = e.key.match(dateRe); return { k:new Date(`${y}-${m}-${d}`).getTime(), kind:"time" };
+      }
+      if (e.key && iterRe.test(e.key)) return { k:parseInt(e.key.match(iterRe)[1],10), kind:"iter" };
+      return { k:idx, kind:"idx" };
+    };
+    return (Array.isArray(hist)?hist:[])
+      .map((e,i)=>({e,key:toKey(e,i)}))
+      .sort((a,b)=>{
+        if (a.key.kind==="col" && b.key.kind==="col") return a.key.k - b.key.k; // plus petit = plus récent
+        return b.key.k - a.key.k; // RÉCENT -> ANCIEN pour time/iter
+      })
+      .map(x=>x.e);
+  }
+
+  function scrollToRight(el) {
+    if (!el) return;
+    requestAnimationFrame(() => { el.scrollLeft = el.scrollWidth; });
+  }
+
+  function prettyKeyWithDate(entry) {
+    const dateRe = /(\d{2})\/(\d{2})\/(\d{4})/;
+    const fullDate = (entry.date && dateRe.test(entry.date))
+      ? entry.date
+      : (entry.key && dateRe.test(entry.key) ? entry.key.match(dateRe)[0] : "");
+    const title = entry.date ? (entry.key || entry.date) : (entry.key || "");
+    return fullDate ? `${title} (${fullDate})` : title;
+  }
+
   await buildCombinedSelect();
 
   // État initial
@@ -154,6 +196,8 @@ async function initApp() {
   function handleSelectChange() {
     // on repart propre à chaque changement
     if (window.__delayValues) window.__delayValues = {};
+    if (window.__srToggles)   window.__srToggles   = {};
+    if (window.__srBaseline)  window.__srBaseline  = {};
 
     const sel = document.getElementById("date-select");
     if (!sel || !sel.selectedOptions.length) return;
@@ -178,6 +222,16 @@ async function initApp() {
 
     // ⬅️ ajoute les délais choisis via le menu
     Object.assign(entries, window.__delayValues || {});
+    
+    // embarquer l'état SR pour TOUTES les questions (visibles + masquées),
+    // mais seulement si l'utilisateur a modifié l'état par rapport au backend
+    if (window.__srToggles && window.__srBaseline) {
+      for (const [id, onOff] of Object.entries(window.__srToggles)) {
+        if (window.__srBaseline[id] !== onOff) {
+          entries["__srToggle__" + id] = onOff; // "on" | "off"
+        }
+      }
+    }
 
     const selected = dateSelect.selectedOptions[0];
     const mode = selected?.dataset.mode || "daily";
@@ -223,6 +277,9 @@ async function initApp() {
 
         // on peut vider les délais mémorisés pour repartir propre
         if (window.__delayValues) window.__delayValues = {};
+        // on repart propre aussi pour SR
+        window.__srToggles  = {};
+        window.__srBaseline = {};
 
         setTimeout(() => {
           if (mode === "practice") {
@@ -299,55 +356,75 @@ async function initApp() {
     }
   }
 
-  // Remplace TOUTE ta fonction renderLikertChart par celle-ci
+  // ⬇️ Version avec labels à chaque point et largeur dynamique
   function renderLikertChart(parentEl, history, normalize) {
     const hist = Array.isArray(history) ? history.slice() : [];
     if (!hist.length) return;
 
-    // ---- Ordonner ancien -> récent (récent à DROITE)
+    // ---- Ordonnancement: ANCIEN -> RÉCENT (récent à DROITE)
     const dateRe = /(\d{2})\/(\d{2})\/(\d{4})/;
-    const iterRe = /\b(\d+)\s*\(/; // ex: "Badminton 12 (..)"
+    const iterRe = /\b(\d+)\s*\(/; // "Catégorie 12 (...)"
     const toKey = (e, idx) => {
+      if (Number.isFinite(e.colIndex)) return { k: e.colIndex, kind: "col" }; // plus petit = plus récent dans ta feuille
       if (e.date && dateRe.test(e.date)) {
         const [, d, m, y] = e.date.match(dateRe);
-        return new Date(`${y}-${m}-${d}`).getTime();
+        return { k: new Date(`${y}-${m}-${d}`).getTime(), kind: "time" };
       }
       if (e.key && dateRe.test(e.key)) {
         const [, d, m, y] = e.key.match(dateRe);
-        return new Date(`${y}-${m}-${d}`).getTime();
+        return { k: new Date(`${y}-${m}-${d}`).getTime(), kind: "time" };
       }
-      if (e.key && iterRe.test(e.key)) return parseInt(e.key.match(iterRe)[1], 10);
-      return idx; // fallback: ordre fourni
+      if (e.key && iterRe.test(e.key)) return { k: parseInt(e.key.match(iterRe)[1], 10), kind: "iter" };
+      return { k: idx, kind: "idx" };
     };
-    const ordered = hist.map((e,i)=>({e,k:toKey(e,i)})).sort((a,b)=>a.k-b.k).map(x=>x.e);
+    const ordered = hist
+      .map((e,i)=>({e, key:toKey(e,i)}))
+      .sort((a,b) => {
+        if (a.key.kind === "col" && b.key.kind === "col") return b.key.k - a.key.k; // DESC -> ancien à gauche
+        return a.key.k - b.key.k; // ASC  -> ancien à gauche
+      })
+      .map(x=>x.e);
 
-    // ---- Points Likert
+    // --- Mapping Likert
     const levels = ["non","plutot non","moyen","plutot oui","oui"];
-    const labelByNorm = { "non":"Non","plutot non":"Plutôt non","moyen":"Moyen","plutot oui":"Plutôt oui","oui":"Oui" };
+    const pretty  = { "non":"Non","plutot non":"Plutôt non","moyen":"Moyen","plutot oui":"Plutôt oui","oui":"Oui" };
+    const pickDate = (e) => {
+      const dateRe = /(\d{2})\/(\d{2})\/(\d{4})/;
+      if (e.date && dateRe.test(e.date)) return e.date;
+      if (e.key  && dateRe.test(e.key))  return e.key.match(dateRe)[0];
+      return "";
+    };
     const points = ordered.map(e => {
       const v = normalize(e.value);
       const idx = levels.indexOf(v);
-      return (idx === -1) ? null : { v, idx, raw:e };
+      if (idx === -1) return null;
+      const fullDate = pickDate(e);
+      const shortDate = fullDate ? fullDate.slice(0,5) : "";
+      const fallback = e.date || e.key || "";
+      return { idx, v, label: shortDate || fallback.slice(0,5), fullLabel: fullDate || fallback, raw: e };
     }).filter(Boolean);
     if (points.length < 2) return;
 
-    // ---- Layout responsive + scrollable (mobile)
-    const pad = { l: 70, r: 16, t: 10, b: 28 };
-    const stepPx = 28;                    // espacement horizontal par point
-    const parentW = Math.max(280, Math.floor(parentEl.getBoundingClientRect().width || 280));
-    const neededPlotW = (points.length - 1) * stepPx + pad.l + pad.r;
-    const plotW = Math.max(parentW, neededPlotW);   // si plus grand -> overflow horizontal
-    const plotH = 160;
+    // ---- Mesurer la largeur des labels pour espacement sans chevauchement
+    const measCanvas = document.createElement("canvas");
+    const mctx = measCanvas.getContext("2d");
+    mctx.font = "11px system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial";
+    let maxLabelW = 0;
+    for (const p of points) maxLabelW = Math.max(maxLabelW, Math.ceil(mctx.measureText(p.label).width));
+    const stepPx = Math.max(28, maxLabelW + 12);
 
+    // ---- Layout
+    const pad = { l: 16, r: 86, t: 14, b: 30 }; // légende à droite
+    const parentW = Math.max(300, Math.floor(parentEl.getBoundingClientRect().width || 300));
+    const neededPlotW = (points.length - 1) * stepPx + pad.l + pad.r;
+    const plotW = Math.max(parentW, neededPlotW);
+    const plotH = 176;
+
+    // conteneur scrollable (mobile-friendly)
     const scroller = document.createElement("div");
-    // styles inline pour garantir le scroll sur mobile
-    scroller.style.width = "100%";
-    scroller.style.maxWidth = "100%";
-    scroller.style.display = "block";
-    scroller.style.overflowX = "auto";
-    scroller.style.overflowY = "hidden";
-    scroller.style.WebkitOverflowScrolling = "touch";
-    scroller.style.touchAction = "pan-x";
+    scroller.style.cssText = "width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-x;";
+    scroller.dataset.autoscroll = "right";
+    parentEl._likertScroller = scroller;
     parentEl.appendChild(scroller);
 
     const canvas = document.createElement("canvas");
@@ -357,9 +434,20 @@ async function initApp() {
     canvas.style.width  = plotW + "px";
     canvas.style.height = plotH + "px";
     canvas.style.display = "block";
-    canvas.style.maxWidth = "none";  // IMPORTANT: ne pas se rétrécir
-    canvas.className = "mb-3 rounded";
+    canvas.style.borderRadius = "10px";
     scroller.appendChild(canvas);
+    // scroll au plus récent (droite) avec double rAF
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scroller.scrollLeft = scroller.scrollWidth;
+      });
+    });
+
+    // petit tooltip
+    const tip = document.createElement("div");
+    tip.style.cssText = "position:absolute;padding:6px 8px;background:#111827;color:#fff;border-radius:6px;font-size:12px;pointer-events:none;opacity:0;transform:translate(-50%,-120%);white-space:nowrap;transition:opacity .12s;";
+    scroller.style.position = "relative";
+    scroller.appendChild(tip);
 
     const ctx = canvas.getContext("2d");
     ctx.scale(dpr, dpr);
@@ -367,47 +455,48 @@ async function initApp() {
     const w = plotW - pad.l - pad.r;
     const h = plotH - pad.t - pad.b;
 
-    // fond
+    // --- fond arrondi
+    const r = 10;
+    ctx.save();
+    const rr = (x,y,w,h,r) => { ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); };
+    rr(4,4,plotW-8,plotH-8,r);
+    ctx.clip();
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, plotW, plotH);
+    ctx.fillRect(0,0,plotW,plotH);
+    ctx.restore();
 
-    // grille + labels Y
-    ctx.strokeStyle = "#e5e7eb";
+    // --- grille douce
+    ctx.strokeStyle = "#eaecef";
     ctx.lineWidth = 1;
-    ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial";
-    ctx.fillStyle = "#374151";
     for (let i = 0; i < levels.length; i++) {
       const y = pad.t + (h / (levels.length - 1)) * (levels.length - 1 - i);
       ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + w, y); ctx.stroke();
-      ctx.fillText(labelByNorm[levels[i]] || levels[i], 8, y + 4);
     }
 
-    // ticks X
+    // --- repères X et labels à chaque point
     const n = points.length;
     const step = n > 1 ? w / (n - 1) : w;
-    const xTickEvery = Math.max(1, Math.floor(n / 10));
-    ctx.strokeStyle = "#f3f4f6";
-    for (let i = 0; i < n; i += xTickEvery) {
-      const x = pad.l + i * step;
-      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + h); ctx.stroke();
-    }
-
-    // labels X (dates / itérations)
-    ctx.font = "10px system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial";
     ctx.fillStyle = "#6b7280";
-    for (let i = 0; i < n; i += xTickEvery) {
-      const x = pad.l + i * step;
-      const e = points[i].raw;
-      let label = "";
-      if (e.date && dateRe.test(e.date)) label = e.date.slice(0,5);
-      else if (e.key && dateRe.test(e.key)) label = e.key.match(dateRe)[0].slice(0,5);
-      else if (e.key && iterRe.test(e.key)) label = "N=" + e.key.match(iterRe)[1];
-      ctx.fillText(label, x - 16, pad.t + h + 16);
+    ctx.font = "11px system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial";
+    ctx.textAlign = "center";
+
+    // --- légende à DROITE (Oui en haut, Non en bas)
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#374151";
+    ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial";
+    for (let i = 0; i < levels.length; i++) {
+      const y = pad.t + (h / (levels.length - 1)) * (levels.length - 1 - i);
+      ctx.fillText(pretty[levels[i]] || levels[i], pad.l + w + 10, y + 4);
     }
 
-    // courbe
-    ctx.strokeStyle = "#2563eb";
+    // --- ligne avec dégradé
+    const grad = ctx.createLinearGradient(pad.l, 0, pad.l + w, 0);
+    grad.addColorStop(0,  "#60a5fa"); // bleu clair
+    grad.addColorStop(1,  "#7c3aed"); // violet
+    ctx.strokeStyle = grad;
     ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     ctx.beginPath();
     points.forEach((p, i) => {
       const x = pad.l + i * step;
@@ -416,21 +505,51 @@ async function initApp() {
     });
     ctx.stroke();
 
-    // points
-    ctx.fillStyle = "#1f2937";
+    // --- points
+    ctx.fillStyle = "#111827";
+    const dotRadius = 2.8;
+    const dotXY = [];
     points.forEach((p, i) => {
       const x = pad.l + i * step;
       const y = pad.t + (h / (levels.length - 1)) * (levels.length - 1 - p.idx);
-      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, dotRadius, 0, Math.PI*2); ctx.fill();
+      dotXY.push({x,y, p});
+      // label sous chaque point
+      ctx.fillStyle = "#6b7280";
+      ctx.fillText(p.label, x, pad.t + h + 18);
+      ctx.fillStyle = "#111827";
     });
 
-    // axe X
-    ctx.strokeStyle = "#9ca3af";
+    // --- axe X
+    ctx.strokeStyle = "#d1d5db";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(pad.l, pad.t + h); ctx.lineTo(pad.l + w, pad.t + h); ctx.stroke();
 
-    // se placer tout à droite (le plus récent) s'il y a overflow
+    // --- scroll au plus récent (droite) si overflow (conservé)
     requestAnimationFrame(() => { scroller.scrollLeft = scroller.scrollWidth; });
+
+    // --- tooltip simple
+    canvas.addEventListener("mousemove", (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = (ev.clientX - rect.left);
+      const y = (ev.clientY - rect.top);
+      // cherche le point le plus proche
+      let best = null, bestD = 99999;
+      for (const d of dotXY) {
+        const dx = x - d.x, dy = y - d.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < bestD) { bestD = dist; best = d; }
+      }
+      if (best && bestD < 18) {
+        tip.style.left = Math.round(best.x) + "px";
+        tip.style.top  = Math.round(best.y) + "px";
+        tip.innerHTML = `${best.p.fullLabel || ""} · <b>${pretty[best.p.v] || best.p.v}</b>`;
+        tip.style.opacity = "1";
+      } else {
+        tip.style.opacity = "0";
+      }
+    });
+    canvas.addEventListener("mouseleave", () => { tip.style.opacity = "0"; });
   }
 
   function addDelayUI(wrapper, q) {
@@ -491,13 +610,13 @@ async function initApp() {
           { label: "1 mois (~30 j)", value: 30 }
         ]
       : [
-          { label: "0", value: 0 },
           { label: "1", value: 1 },
           { label: "2", value: 2 },
           { label: "3", value: 3 },
           { label: "5", value: 5 },
           { label: "8", value: 8 },
-          { label: "13", value: 13 }
+          { label: "13", value: 13 },
+          { label: "21", value: 21 }
         ];
 
     const grid = document.createElement("div");
@@ -555,27 +674,68 @@ async function initApp() {
     });
     actions.appendChild(closeBtn);
 
+    // --- ÉTAT SR côté front (mémoire volatile) ---
+    window.__srToggles = window.__srToggles || {}; // clé: q.id -> "on"|"off"
+    // Affichage de l'état SR actuel (v. API doGet ci-dessous)
+    const srCurrent = q.scheduleInfo?.sr || { on:false };
+    if (!(q.id in window.__srBaseline)) {
+      window.__srBaseline[q.id] = srCurrent.on ? "on" : "off";
+    }
+    if (!(q.id in window.__srToggles)) {
+      window.__srToggles[q.id] = srCurrent.on ? "on" : "off";
+    }
+    // Ligne SR
+    const srRow = document.createElement("div");
+    srRow.className = "border-t border-gray-100 p-2 flex items-center justify-between";
+    pop.appendChild(srRow);
+    const srLabel = document.createElement("span");
+    srLabel.className = "text-xs text-gray-700";
+    srLabel.innerHTML = `Répétition espacée : <strong>${window.__srToggles[q.id] === "on" ? "ON" : "OFF"}</strong>` +
+      (srCurrent.on && srCurrent.interval ? ` <span class="text-gray-500">(${srCurrent.unit==="iters" ? srCurrent.interval+" itér." : srCurrent.due ? "due "+srCurrent.due : srCurrent.interval+" j"})</span>` : "");
+    srRow.appendChild(srLabel);
+    const srBtn = document.createElement("button");
+    srBtn.type = "button";
+    srBtn.className = "text-xs text-blue-600 hover:underline";
+    srBtn.textContent = window.__srToggles[q.id] === "on" ? "Désactiver SR" : "Activer SR";
+    srBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      window.__srToggles[q.id] = window.__srToggles[q.id] === "on" ? "off" : "on";
+      srBtn.textContent = window.__srToggles[q.id] === "on" ? "Désactiver SR" : "Activer SR";
+      srLabel.innerHTML = `Répétition espacée : <strong>${window.__srToggles[q.id] === "on" ? "ON" : "OFF"}</strong>`;
+    });
+    srRow.appendChild(srBtn);
+
     // Toggle popover + gestion du click outside (attaché à l'ouverture)
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
 
-      // Ferme les autres popovers ouverts
+      // Ferme les autres popovers
       document.querySelectorAll('[data-pop="delay"]').forEach(el => {
-        if (el !== pop) el.classList.add("hidden");
+        if (el !== pop) {
+          el.classList.add("hidden");
+          if (el._onOutside) {
+            document.removeEventListener("click", el._onOutside);
+            el._onOutside = null;
+          }
+        }
       });
 
+      const wasHidden = pop.classList.contains("hidden");
       pop.classList.toggle("hidden");
 
-      const onOutside = (e) => {
-        if (!pop.contains(e.target) && e.target !== btn) {
-          pop.classList.add("hidden");
-          document.removeEventListener("click", onOutside);
-        }
-      };
-
-      // n'attache le listener global que si on vient d'ouvrir
-      if (!pop.classList.contains("hidden")) {
-        setTimeout(() => document.addEventListener("click", onOutside), 0);
+      // si on vient d'ouvrir → poser l'écouteur; si on vient de fermer → l'enlever
+      if (wasHidden) {
+        pop._onOutside = (e) => {
+          if (!pop.contains(e.target) && e.target !== btn) {
+            pop.classList.add("hidden");
+            document.removeEventListener("click", pop._onOutside);
+            pop._onOutside = null;
+          }
+        };
+        setTimeout(() => document.addEventListener("click", pop._onOutside), 0);
+      } else if (pop._onOutside) {
+        document.removeEventListener("click", pop._onOutside);
+        pop._onOutside = null;
       }
     });
   }
@@ -586,6 +746,7 @@ async function initApp() {
     container.innerHTML = "";
     console.log(`✍️ Rendu de ${questions.length} question(s)`);
 
+    const hiddenSR = []; // questions masquées par SR/delay
     const normalize = (str) =>
       (str || "")
       .normalize("NFD")
@@ -613,13 +774,19 @@ async function initApp() {
         console.log("-> Raison du masquage :", q.reason);
       }
       console.groupEnd();
-
+      
+      if (q.skipped) {
+        // on garde tout (history, scheduleInfo…) pour pouvoir afficher délai + historique
+        hiddenSR.push(q);
+        return;
+      }
+      
       const wrapper = document.createElement("div");
       wrapper.className = "mb-8 p-4 rounded-lg shadow-sm";
 
       const label = document.createElement("label");
       label.className = "block text-lg font-semibold mb-2";
-      label.textContent = q.skipped ? `🎉 ${q.label}` : q.label;
+      label.textContent = q.label;
       wrapper.appendChild(label);
 
       // Pré-remplissage en mode journalier (si history contient la date sélectionnée)
@@ -638,54 +805,43 @@ async function initApp() {
           referenceAnswer = entry?.value || "";
         }
       }
+      let input;
+      const type = (q.type || "").toLowerCase();
 
-      if (q.skipped) {
-        wrapper.classList.add("bg-green-50", "border", "border-green-200", "opacity-70");
-
-        const reason = document.createElement("p");
-        reason.className = "text-sm italic text-green-700 mb-2";
-        reason.textContent = q.reason || "⏳ Cette question est temporairement masquée.";
-        wrapper.appendChild(reason);
-
-        // Pas d'input caché ici, on gère les questions masquées côté back
+      if (type.includes("oui")) {
+        input = document.createElement("div");
+        input.className = "space-x-6 text-gray-700";
+        input.innerHTML = `<label><input type="radio" name="${q.id}" value="Oui" class="mr-1" ${referenceAnswer === "Oui" ? "checked" : ""}>Oui</label>
+          <label><input type="radio" name="${q.id}" value="Non" class="mr-1" ${referenceAnswer === "Non" ? "checked" : ""}>Non</label>`;
+      } else if (type.includes("menu") || type.includes("likert")) {
+        input = document.createElement("select");
+        input.name = q.id;
+        input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
+        ["", "Oui", "Plutôt oui", "Moyen", "Plutôt non", "Non", "Pas de réponse"].forEach(opt => {
+          const option = document.createElement("option");
+          option.value = opt;
+          option.textContent = opt;
+          if (opt === referenceAnswer) option.selected = true;
+          input.appendChild(option);
+        });
+      } else if (type.includes("plus long")) {
+        input = document.createElement("textarea");
+        input.name = q.id;
+        input.rows = 4;
+        // sm = mobile ; md = ≥768px
+        input.className = "mt-1 p-2 border rounded w-full bg-white text-gray-800 text-sm md:text-base leading-tight";
+        input.value = referenceAnswer;
       } else {
-        let input;
-        const type = (q.type || "").toLowerCase();
-
-        if (type.includes("oui")) {
-          input = document.createElement("div");
-          input.className = "space-x-6 text-gray-700";
-          input.innerHTML = `<label><input type="radio" name="${q.id}" value="Oui" class="mr-1" ${referenceAnswer === "Oui" ? "checked" : ""}>Oui</label>
-            <label><input type="radio" name="${q.id}" value="Non" class="mr-1" ${referenceAnswer === "Non" ? "checked" : ""}>Non</label>`;
-        } else if (type.includes("menu") || type.includes("likert")) {
-          input = document.createElement("select");
-          input.name = q.id;
-          input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
-          ["", "Oui", "Plutôt oui", "Moyen", "Plutôt non", "Non", "Pas de réponse"].forEach(opt => {
-            const option = document.createElement("option");
-            option.value = opt;
-            option.textContent = opt;
-            if (opt === referenceAnswer) option.selected = true;
-            input.appendChild(option);
-          });
-        } else if (type.includes("plus long")) {
-          input = document.createElement("textarea");
-          input.name = q.id;
-          input.rows = 4;
-          input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
-          input.value = referenceAnswer;
-        } else {
-          input = document.createElement("input");
-          input.name = q.id;
-          input.type = "text";
-          input.className = "mt-1 p-2 border rounded w-full text-gray-800 bg-white";
-          input.value = referenceAnswer;
-        }
-
-        wrapper.appendChild(input);
-        addDelayUI(wrapper, q); // Appel du nouveau helper ici
+        input = document.createElement("input");
+        input.name = q.id;
+        input.type = "text";
+        input.className = "mt-1 p-2 border rounded w-full bg-white text-gray-800 text-sm md:text-base leading-tight";
+        input.value = referenceAnswer;
       }
 
+      wrapper.appendChild(input);
+      addDelayUI(wrapper, q); // Appel du nouveau helper ici
+    
       // 📓 Historique (compatible daily et practice)
       if (q.history && q.history.length > 0) {
         console.log(`📖 Affichage de l'historique pour "${q.label}" (${q.history.length} entrées)`);
@@ -700,6 +856,10 @@ async function initApp() {
         // Graphe Likert + 2 stats compactes (sur 30 dernières)
         renderLikertChart(historyBlock, q.history, normalize);
 
+        // --- Tri commun pour stats & liste : RÉCENT -> ANCIEN ---
+        const orderedForStats = orderForHistory(q.history);
+
+        // --- Stats compactes sur fenêtre récente ---
         const LIMIT = 10;
         const WINDOW = 30;
         const badge = (title, value, tone="blue") => {
@@ -708,7 +868,7 @@ async function initApp() {
             blue:"bg-blue-50 text-blue-700 border-blue-200",
             green:"bg-green-50 text-green-700 border-green-200",
             yellow:"bg-yellow-50 text-yellow-700 border-yellow-200",
-            red:"bg-red-50 text-red-700 border-red-200",
+            red:"bg-red-50 text-red-900 border-red-200",
             gray:"bg-gray-50 text-gray-700 border-gray-200",
             purple:"bg-purple-50 text-purple-700 border-purple-200"
           };
@@ -717,14 +877,18 @@ async function initApp() {
           return div;
         };
         const POSITIVE = new Set(["oui","plutot oui"]);
-        const windowHist = (q.history || []).slice(0, WINDOW);
 
+        // Fenêtre des N plus récents
+        const windowHist = orderedForStats.slice(0, WINDOW);
+
+        // Série courante (positifs consécutifs depuis le plus récent)
         let currentStreak = 0;
         for (const e of windowHist) {
           if (POSITIVE.has(normalize(e.value))) currentStreak++;
           else break;
         }
 
+        // Réponse la plus fréquente (dans la fenêtre)
         const counts = {};
         const order = ["non","plutot non","moyen","plutot oui","oui"];
         for (const e of windowHist) {
@@ -743,9 +907,9 @@ async function initApp() {
         if (best) statsWrap.appendChild(badge("Réponse la plus fréquente", pretty[best] || best, "purple"));
         historyBlock.appendChild(statsWrap);
 
-        // Liste (10 visibles) + bouton Afficher plus / Réduire
-        (q.history || []).forEach((entry, idx) => {
-          const key = entry.date || entry.key || "";
+        // --- Liste : utilise le même ordre trié (récent -> ancien) ---
+        orderedForStats.forEach((entry, idx) => {
+          const keyPretty = prettyKeyWithDate(entry);
           const val = entry.value;
           const normalized = normalize(val);
           const colorClass = colorMap[normalized] || "bg-gray-100 text-gray-700";
@@ -753,15 +917,15 @@ async function initApp() {
           const entryDiv = document.createElement("div");
           entryDiv.className = `mb-2 px-3 py-2 rounded ${colorClass}`;
           if (idx >= LIMIT) entryDiv.classList.add("hidden", "extra-history");
-          entryDiv.innerHTML = `<strong>${key}</strong> – ${val}`;
+          entryDiv.innerHTML = `<strong>${keyPretty}</strong> – ${val}`;
           historyBlock.appendChild(entryDiv);
         });
 
-        if (q.history && q.history.length > LIMIT) {
+        if (orderedForStats.length > LIMIT) {
           const moreBtn = document.createElement("button");
           moreBtn.type = "button";
           moreBtn.className = "mt-2 text-xs text-blue-600 hover:underline";
-          let expanded = false; const rest = q.history.length - LIMIT;
+          let expanded = false; const rest = orderedForStats.length - LIMIT;
           const setLabel = () => moreBtn.textContent = expanded ? "Réduire" : `Afficher plus (${rest} de plus)`;
           setLabel();
           moreBtn.addEventListener("click", () => {
@@ -773,7 +937,9 @@ async function initApp() {
         }
 
         toggleBtn.addEventListener("click", () => {
+          const wasHidden = historyBlock.classList.contains("hidden");
           historyBlock.classList.toggle("hidden");
+          if (wasHidden) scrollToRight(historyBlock._likertScroller);
         });
 
         wrapper.appendChild(toggleBtn);
@@ -783,6 +949,154 @@ async function initApp() {
       container.appendChild(wrapper);
     });
 
+    // === Panneau "Questions masquées (SR)" ===
+    if (hiddenSR.length) {
+      const panel = document.createElement("div");
+      panel.className = "mt-6";
+
+      const details = document.createElement("details");
+      details.className = "bg-gray-50 border border-gray-200 rounded-lg";
+      details.open = false; // toujours replié par défaut
+
+      const summary = document.createElement("summary");
+      summary.className = "cursor-pointer select-none px-4 py-2 font-medium text-gray-800 flex items-center justify-between";
+      summary.innerHTML = `
+        <span>🔕 ${hiddenSR.length} question(s) masquée(s) — répétition espacée</span>
+        <span class="text-sm text-gray-500">voir</span>
+      `;
+      details.appendChild(summary);
+
+      const list = document.createElement("div");
+      list.className = "px-4 pt-2 pb-3";
+
+      const normalize = (str) =>
+        (str || "")
+          .normalize("NFD").replace(/[̀-ͯ]/g, "")
+          .replace(/[\u00A0\u202F\u200B]/g, " ")
+          .replace(/\s+/g, " ")
+          .toLowerCase()
+          .trim();
+
+      hiddenSR.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "mb-2 rounded bg-white border border-gray-200";
+
+        // en-tête de l'item
+        const head = document.createElement("div");
+        head.className = "px-3 py-2 flex items-center justify-between";
+        const title = document.createElement("div");
+        title.innerHTML = `<strong>${item.label}</strong>`;
+        head.appendChild(title);
+
+        // r: toggle sur tout le header
+        head.classList.add("cursor-pointer");
+        head.addEventListener("click", () => {
+          const wasHidden = content.classList.contains("hidden");
+          content.classList.toggle("hidden");
+          if (wasHidden) {
+            const sc = content.querySelector('[data-autoscroll="right"]');
+            scrollToRight(sc);
+          }
+        });
+
+        // infos "prochaine échéance"
+        const sub = document.createElement("div");
+        sub.className = "px-3 pb-2 text-sm text-gray-700 flex items-center gap-2";
+        const extras = [];
+        if (item.scheduleInfo?.nextDate) extras.push(`Prochaine : ${item.scheduleInfo.nextDate}`);
+        if (Number(item.scheduleInfo?.remaining) > 0) extras.push(`Restant : ${item.scheduleInfo.remaining} itér.`);
+        const tail = extras.length ? ` (${extras.join(" — ")})` : "";
+        const reason = item.reason || "Répétition espacée";
+        sub.innerHTML = `⏱️ ${reason.replace(/^✅\s*/, '')}${tail}`;
+
+        // contenu détaillé replié
+        const content = document.createElement("div");
+        content.className = "px-3 pb-3 hidden";
+
+        // 1) UI Délai (mêmes options que pour les visibles)
+        const delayWrap = document.createElement("div");
+        addDelayUI(delayWrap, item);
+        content.appendChild(delayWrap);
+
+        // 2) Historique (même principe : bouton + bloc avec graphe + liste)
+        if (item.history && item.history.length > 0) {
+          const toggleBtn = document.createElement("button");
+          toggleBtn.type = "button";
+          toggleBtn.className = "mt-3 text-sm text-blue-600 hover:underline";
+          toggleBtn.textContent = "📓 Voir l’historique des réponses";
+
+          const historyBlock = document.createElement("div");
+          historyBlock.className = "mt-3 p-3 rounded bg-gray-50 border text-sm text-gray-700 hidden";
+
+          // graphe likert
+          renderLikertChart(historyBlock, item.history, normalize);
+
+          // liste (RÉCENTS -> ANCIENS)
+          const ordered = orderForHistory(item.history);
+
+          const colorMap = {
+            "oui": "bg-green-100 text-green-800",
+            "plutot oui": "bg-green-50 text-green-700",
+            "moyen": "bg-yellow-100 text-yellow-800",
+            "plutot non": "bg-red-100 text-red-900",
+            "non": "bg-red-200 text-red-900",
+            "pas de reponse": "bg-gray-200 text-gray-700 italic"
+          };
+
+          const LIMIT = 10;
+          ordered.forEach((entry, idx) => {
+            const keyPretty = prettyKeyWithDate(entry);
+            const val = entry.value;
+            const normalized = normalize(val);
+            const div = document.createElement("div");
+            div.className = `mb-2 px-3 py-2 rounded ${colorMap[normalized] || "bg-gray-100 text-gray-700"}`;
+            if (idx >= LIMIT) div.classList.add("hidden", "extra-history");
+            div.innerHTML = `<strong>${keyPretty}</strong> – ${val}`;
+            historyBlock.appendChild(div);
+          });
+
+          if (ordered.length > LIMIT) {
+            const moreBtn = document.createElement("button");
+            moreBtn.type = "button";
+            moreBtn.className = "mt-2 text-xs text-blue-600 hover:underline";
+            let expanded = false; const rest = ordered.length - LIMIT;
+            const setLabel = () => moreBtn.textContent = expanded ? "Réduire" : `Afficher plus (${rest} de plus)`;
+            setLabel();
+            moreBtn.addEventListener("click", () => {
+              expanded = !expanded;
+              historyBlock.querySelectorAll(".extra-history").forEach(el => el.classList.toggle("hidden", !expanded));
+              setLabel();
+            });
+            historyBlock.appendChild(moreBtn);
+          }
+
+          toggleBtn.addEventListener("click", () => {
+            const wasHidden = historyBlock.classList.contains("hidden");
+            historyBlock.classList.toggle("hidden");
+            if (wasHidden) scrollToRight(historyBlock._likertScroller);
+          });
+
+          content.appendChild(toggleBtn);
+          content.appendChild(historyBlock);
+        }
+
+        // toggle du volet de l'item: supprimé (on clique sur l'entête)
+
+        row.appendChild(head);
+        row.appendChild(sub);
+        row.appendChild(content);
+        list.appendChild(row);
+      });
+
+      const note = document.createElement("p");
+      note.className = "mt-2 text-xs text-gray-500";
+      note.textContent = "Ces items sont masqués automatiquement suite à vos réponses positives. Ils réapparaîtront à l’échéance.";
+      list.appendChild(note);
+
+      details.appendChild(list);
+      panel.appendChild(details);
+      container.appendChild(panel);
+    }
     showFormUI();
     console.log("✅ Rendu des questions terminé.");
   }
